@@ -1,49 +1,59 @@
-name: Windows-RDP
+name: Windows
 
 on: workflow_dispatch
 
 jobs:
   build:
-    name: Start Windows RDP
     runs-on: windows-latest
-    timeout-minutes: 360 # أقصى مدة مسموحة هي 6 ساعات
-
     steps:
-      - name: Download & Extract Ngrok
+      - name: Configure Some RDP Settings
         run: |
-          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-          Expand-Archive ngrok.zip
-          
-      - name: Authenticate Ngrok
-        run: .\ngrok.exe config add-authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
-        
-      - name: Enable RDP (Remote Desktop)
-        run: | 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-          
-      - name: Create RDP User Credentials
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -value 1
+
+      - name: Create RDP User with Static Password
         run: |
-          net user runneradmin "WindowsPassword123!" 
-          # اليوزر الافتراضي هو runneradmin والباسورد أعلاه
-          
-      - name: Start Ngrok Tunnel
+          $Password = "Admin@123"
+          $SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+          New-LocalUser -Name "Admin1" -Password $SecurePassword
+          Add-LocalGroupMember -Group "Administrators" -Member "Admin1"
+          if ($?) { Write-Host "RDP user created successfully" } else { Write-Error "User creation failed" }
+
+      - name: Install Tailscale
         run: |
-          Start-Process Powershell -ArgumentList '-Noprofile -ExecutionPolicy Bypass -Command ".\ngrok.exe tcp 3389"'
-          Start-Sleep -Seconds 5
-          
-      - name: Print RDP Connect Details
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-1.48.2-amd64.exe" -OutFile "tailscale-setup.exe"
+          Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
+
+      - name: Establish Tailscale Connection
         run: |
-          $tunnel = Invoke-WebRequest -Uri http://127.0.0.1:4040/api/tunnels -UseBasicParsing | ConvertFrom-Json
-          $url = $tunnel.tunnels[0].public_url
-          Write-Host "=========================================="
-          Write-Host "تم تشغيل الـ RDP بنجاح!"
-          Write-Host "IP / Address: $url"
-          Write-Host "Username: runneradmin"
-          Write-Host "Password: WindowsPassword123!"
-          Write-Host "=========================================="
-          
-      - name: Keep Session Alive
-        run: Start-Sleep -Seconds 21600 # يبقي الجلسة فعالة لمدة 6 ساعات
-        
+          $Env:TAILSCALE_AUTHKEY = "${{ secrets.TAILSCALE_AUTHKEY }}"
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$Env:TAILSCALE_AUTHKEY --reset
+          Start-Sleep -Seconds 10
+          $ip = (tailscale ip -4)
+          if (-not $ip) {
+            Write-Error "Tailscale IP not assigned. Exiting."
+            exit 1
+          }
+          Write-Host "Tailscale IP: $ip"
+
+      - name: Verify RDP Accessibility
+        run: |
+          $port = 3389
+          $connection = Test-NetConnection -ComputerName localhost -Port $port
+          if ($connection.TcpTestSucceeded) {
+            Write-Host "RDP is listening on port $port"
+          } else {
+            Write-Host "RDP connection test on port $port failed"
+          }
+
+      - name: Network Connection
+        run: |
+          $TailscaleIP = (tailscale ip -4)
+          Write-Host "TAILSCALE IP: $TailscaleIP"
+          Write-Host "Username: Admin1"
+          Write-Host "Password: Admin@123"
+          # Keep Action running. Max execution time is 6 hours on GitHub Free
+          while ($true) {
+            Start-Sleep -Seconds 300
+          }
